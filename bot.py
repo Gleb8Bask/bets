@@ -7,7 +7,6 @@ from aiogram.filters import CommandStart, Command
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 from dotenv import load_dotenv
 import os
 
@@ -45,34 +44,6 @@ def draw_pairs(users):
         if all(u != s for u, s in zip(users, shuffled)):
             return list(zip(users, shuffled))
 
-# ---------- Menu ----------
-def main_menu():
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="🎄 Создать комнату")],
-            [KeyboardButton(text="🔑 Войти по коду")]
-        ],
-        resize_keyboard=True
-    )
-
-def creator_menu():
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="👥 Участники")],
-            [KeyboardButton(text="🎲 Провести жеребьёвку")]
-        ],
-        resize_keyboard=True
-    )
-
-def confirm_draw():
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="✅ Да", callback_data="draw_yes"),
-                InlineKeyboardButton(text="❌ Нет", callback_data="draw_no")
-            ]
-        ]
-    )
 
 # ---------- Handlers ----------
 @dp.message(CommandStart())
@@ -92,13 +63,10 @@ async def start(message: types.Message, state: FSMContext):
 
         await message.answer("Введите своё имя:")
     else:
-        await message.answer(
-            "🎅 Добро пожаловать в Тайного Санту!",
-            reply_markup=main_menu()
-        )
+        await message.answer("🎅 /create — создать комнату")
 
 
-@dp.message(lambda m: m.text == "🎄 Создать комнату")
+@dp.message(Command("create"))
 async def create_room(message: types.Message):
     code = generate_code()
 
@@ -109,11 +77,7 @@ async def create_room(message: types.Message):
 
     link = f"https://t.me/{(await bot.me()).username}?start={code}"
 
-    await message.answer(
-        f"🎉 Комната создана!\n\n"
-        f"🔗 Пригласи друзей:\n{link}",
-        reply_markup=creator_menu()
-    )
+    await message.answer(f"🎄 Комната создана!\nСсылка для друзей:\n{link}")
 
 
 @dp.message(JoinForm.name)
@@ -130,19 +94,29 @@ async def join_room(message: types.Message, state: FSMContext):
     await state.clear()
 
 
-@dp.callback_query(lambda c: c.data == "draw_yes")
-async def process_draw(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-
+@dp.message(Command("draw"))
+async def draw(message: types.Message):
     room = await db.fetchrow(
         "SELECT * FROM rooms WHERE creator_id=$1",
-        user_id
+        message.from_user.id
     )
+
+    if not room:
+        await message.answer("❌ Вы не создатель комнаты")
+        return
+
+    if room["is_drawn"]:
+        await message.answer("⚠️ Жеребьёвка уже была")
+        return
 
     users = await db.fetch(
         "SELECT user_id, name FROM participants WHERE room_id=$1",
         room["id"]
     )
+
+    if len(users) < 2:
+        await message.answer("❌ Нужно минимум 2 участника")
+        return
 
     user_ids = [u["user_id"] for u in users]
     pairs = draw_pairs(user_ids)
@@ -155,36 +129,17 @@ async def process_draw(callback: types.CallbackQuery):
             f"🎁 Ты даришь подарок: {receiver_name}"
         )
 
-    await callback.message.answer("🎉 Готово!")
-    await callback.answer()
+        await db.execute(
+            "INSERT INTO assignments (giver_id, receiver_id, room_id) VALUES ($1, $2, $3)",
+            giver, receiver, room["id"]
+        )
 
-
-@dp.message(lambda m: m.text == "🎲 Провести жеребьёвку")
-async def confirm(message: types.Message):
-    await message.answer(
-        "⚠️ Провести жеребьёвку? Это нельзя отменить.",
-        reply_markup=confirm_draw()
-    )
-
-
-@dp.message(lambda m: m.text == "👥 Участники")
-async def list_participants(message: types.Message):
-    room = await db.fetchrow(
-        "SELECT * FROM rooms WHERE creator_id=$1",
-        message.from_user.id
-    )
-
-    users = await db.fetch(
-        "SELECT name FROM participants WHERE room_id=$1",
+    await db.execute(
+        "UPDATE rooms SET is_drawn=TRUE WHERE id=$1",
         room["id"]
     )
 
-    text = "👥 Участники:\n\n"
-    for u in users:
-        text += f"• {u['name']}\n"
-
-    await message.answer(text)
-
+    await message.answer("🎉 Жеребьёвка проведена!")
 
 
 # ---------- MAIN ----------
