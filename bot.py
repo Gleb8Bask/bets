@@ -2,11 +2,13 @@ import asyncio
 import random
 import string
 import asyncpg
+from aiogram import F
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import CommandStart, Command
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 from dotenv import load_dotenv
 import os
 
@@ -44,6 +46,34 @@ def draw_pairs(users):
         if all(u != s for u, s in zip(users, shuffled)):
             return list(zip(users, shuffled))
 
+# ---------- KEYBOARDS ----------
+def main_menu():
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="🎄 Создать комнату")],
+            [KeyboardButton(text="🔑 Войти по коду")]
+        ],
+        resize_keyboard=True
+    )
+
+def creator_menu():
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="👥 Участники")],
+            [KeyboardButton(text="🎲 Провести жеребьёвку")]
+        ],
+        resize_keyboard=True
+    )
+
+def confirm_draw():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ Да", callback_data="draw_yes"),
+                InlineKeyboardButton(text="❌ Нет", callback_data="draw_no")
+            ]
+        ]
+    )
 
 # ---------- Handlers ----------
 @dp.message(CommandStart())
@@ -63,10 +93,13 @@ async def start(message: types.Message, state: FSMContext):
 
         await message.answer("Введите своё имя:")
     else:
-        await message.answer("🎅 /create — создать комнату")
+        await message.answer(
+            "🎅 Добро пожаловать в Тайного Санту!",
+            reply_markup=main_menu()
+        )
 
-
-@dp.message(Command("create"))
+# ---------- CREATE ROOM ----------
+@dp.message(lambda m: m.text == "🎄 Создать комнату")
 async def create_room(message: types.Message):
     code = generate_code()
 
@@ -77,36 +110,79 @@ async def create_room(message: types.Message):
 
     link = f"https://t.me/{(await bot.me()).username}?start={code}"
 
-    await message.answer(f"🎄 Комната создана!\nСсылка для друзей:\n{link}")
+    await message.answer(
+        f"🎉 Комната создана!\n\n"
+        f"🔗 Пригласи друзей:\n{link}",
+        reply_markup=creator_menu()
+    )
 
-
+# ---------- JOIN ----------
 @dp.message(JoinForm.name)
 async def join_room(message: types.Message, state: FSMContext):
     data = await state.get_data()
     room_id = data["room_id"]
+
+    # защита от повторного входа
+    exists = await db.fetchrow(
+        "SELECT * FROM participants WHERE user_id=$1 AND room_id=$2",
+        message.from_user.id, room_id
+    )
+
+    if exists:
+        await message.answer("⚠️ Вы уже в комнате")
+        await state.clear()
+        return
 
     await db.execute(
         "INSERT INTO participants (user_id, room_id, name) VALUES ($1, $2, $3)",
         message.from_user.id, room_id, message.text
     )
 
-    await message.answer("✅ Вы в комнате!")
+    await message.answer("✅ Вы присоединились!")
     await state.clear()
 
-
-@dp.message(Command("draw"))
-async def draw(message: types.Message):
+# ---------- LIST PARTICIPANTS ----------
+@dp.message(F.text == "👥 Участники")
+async def list_participants(message: types.Message):
     room = await db.fetchrow(
         "SELECT * FROM rooms WHERE creator_id=$1",
         message.from_user.id
     )
 
+    users = await db.fetch(
+        "SELECT name FROM participants WHERE room_id=$1",
+        room["id"]
+    )
+
+    text = "👥 Участники:\n\n"
+    for u in users:
+        text += f"• {u['name']}\n"
+
+    await message.answer(text)
+
+# ---------- DRAW BUTTON ----------
+@dp.message(F.text == "🎲 Провести жеребьёвку")
+async def confirm(message: types.Message):
+    await message.answer(
+        "⚠️ Провести жеребьёвку? Это нельзя отменить.",
+        reply_markup=confirm_draw()
+    )
+
+@dp.callback_query(F.data == "draw_yes")
+async def process_draw(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+
+    room = await db.fetchrow(
+        "SELECT * FROM rooms WHERE creator_id=$1",
+        user_id
+    )
+
     if not room:
-        await message.answer("❌ Вы не создатель комнаты")
+        await callback.message.answer("❌ Вы не создатель")
         return
 
     if room["is_drawn"]:
-        await message.answer("⚠️ Жеребьёвка уже была")
+        await callback.message.answer("⚠️ Уже проведено")
         return
 
     users = await db.fetch(
@@ -115,7 +191,7 @@ async def draw(message: types.Message):
     )
 
     if len(users) < 2:
-        await message.answer("❌ Нужно минимум 2 участника")
+        await callback.message.answer("❌ Нужно минимум 2 участника")
         return
 
     user_ids = [u["user_id"] for u in users]
@@ -139,7 +215,14 @@ async def draw(message: types.Message):
         room["id"]
     )
 
-    await message.answer("🎉 Жеребьёвка проведена!")
+    await callback.message.answer("🎉 Жеребьёвка завершена!")
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "draw_no")
+async def cancel_draw(callback: types.CallbackQuery):
+    await callback.message.answer("❌ Отменено")
+    await callback.answer()
 
 
 # ---------- MAIN ----------
