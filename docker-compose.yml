@@ -1,0 +1,22 @@
+version: '3.8'
+services:
+  db:
+    image: postgres:16-alpine # Используйте нужную версию
+    container_name: postgres_container
+    restart: always
+    environment:
+      POSTGRES_USER: user_bet        # Имя пользователя
+      POSTGRES_PASSWORD: bets753 # Пароль
+      POSTGRES_DB: bets_bot   # Имя базы данных
+    ports:
+      - "5432:5432"             # Порт хост:порт контейнера
+    volumes:
+      - pgdata:/var/lib/postgresql/data # Сохранение данных
+    networks:
+      - postgres_net
+
+volumes:
+  pgdata: # Именованный том для персистентности данных
+
+networks:
+  postgres_net:
