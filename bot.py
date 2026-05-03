@@ -1,15 +1,20 @@
 import asyncio
 import random
 import string
+import os
 import asyncpg
-from aiogram import Bot, Dispatcher, types
-from aiogram.filters import CommandStart, Command
-from aiogram.fsm.storage.memory import MemoryStorage
+
+from dotenv import load_dotenv
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from dotenv import load_dotenv
-import os
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.types import (
+    ReplyKeyboardMarkup, KeyboardButton
+)
 
+# ---------- INIT ----------
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -26,26 +31,46 @@ class JoinForm(StatesGroup):
     name = State()
 
 
+class PollForm(StatesGroup):
+    question = State()
+    options = State()
+
+class BetForm(StatesGroup):
+    question = State()
+    payment_link = State()
+
 # ---------- DB ----------
 async def create_pool():
     global db
     db = await asyncpg.create_pool(DB_URL)
 
 
-# ---------- Utils ----------
+# ---------- UTILS ----------
 def generate_code(length=6):
     return ''.join(random.choices(string.ascii_uppercase + string.digits, k=length))
 
 
-def draw_pairs(users):
-    while True:
-        shuffled = users[:]
-        random.shuffle(shuffled)
-        if all(u != s for u, s in zip(users, shuffled)):
-            return list(zip(users, shuffled))
+# ---------- KEYBOARDS ----------
+def main_menu():
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="🎄 Создать комнату")],
+        ],
+        resize_keyboard=True
+    )
 
 
-# ---------- Handlers ----------
+def creator_menu():
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="👥 Участники")],
+            [KeyboardButton(text="💰 Опрос с оплатой")]
+        ],
+        resize_keyboard=True
+    )
+
+
+# ---------- START ----------
 @dp.message(CommandStart())
 async def start(message: types.Message, state: FSMContext):
     args = message.text.split()
@@ -61,12 +86,16 @@ async def start(message: types.Message, state: FSMContext):
         await state.update_data(room_id=room["id"])
         await state.set_state(JoinForm.name)
 
-        await message.answer("Введите своё имя:")
+        await message.answer("Введите ваше имя:")
     else:
-        await message.answer("🎅 /create — создать комнату")
+        await message.answer(
+            "Добро пожаловать!",
+            reply_markup=main_menu()
+        )
 
 
-@dp.message(Command("create"))
+# ---------- CREATE ROOM ----------
+@dp.message(F.text == "🎄 Создать комнату")
 async def create_room(message: types.Message):
     code = generate_code()
 
@@ -77,75 +106,136 @@ async def create_room(message: types.Message):
 
     link = f"https://t.me/{(await bot.me()).username}?start={code}"
 
-    await message.answer(f"🎄 Комната создана!\nСсылка для друзей:\n{link}")
+    await message.answer(
+        f"Комната создана!\n\nСсылка:\n{link}",
+        reply_markup=creator_menu()
+    )
 
 
+# ---------- JOIN ----------
 @dp.message(JoinForm.name)
 async def join_room(message: types.Message, state: FSMContext):
     data = await state.get_data()
     room_id = data["room_id"]
+
+    exists = await db.fetchrow(
+        "SELECT * FROM participants WHERE user_id=$1 AND room_id=$2",
+        message.from_user.id, room_id
+    )
+
+    if exists:
+        await message.answer("Вы уже в комнате")
+        await state.clear()
+        return
 
     await db.execute(
         "INSERT INTO participants (user_id, room_id, name) VALUES ($1, $2, $3)",
         message.from_user.id, room_id, message.text
     )
 
-    await message.answer("✅ Вы в комнате!")
+    await message.answer("Вы вошли в комнату")
     await state.clear()
 
 
-@dp.message(Command("draw"))
-async def draw(message: types.Message):
+# ---------- LIST PARTICIPANTS ----------
+@dp.message(F.text == "👥 Участники")
+async def list_participants(message: types.Message):
     room = await db.fetchrow(
         "SELECT * FROM rooms WHERE creator_id=$1",
         message.from_user.id
     )
 
     if not room:
-        await message.answer("❌ Вы не создатель комнаты")
-        return
-
-    if room["is_drawn"]:
-        await message.answer("⚠️ Жеребьёвка уже была")
+        await message.answer("Вы не создатель комнаты")
         return
 
     users = await db.fetch(
-        "SELECT user_id, name FROM participants WHERE room_id=$1",
+        "SELECT name FROM participants WHERE room_id=$1",
         room["id"]
     )
 
-    if len(users) < 2:
-        await message.answer("❌ Нужно минимум 2 участника")
+    text = "Участники:\n\n"
+    for u in users:
+        text += f"• {u['name']}\n"
+
+    await message.answer(text)
+
+
+@dp.message(F.text == "💰 Опрос с оплатой")
+async def start_bet(message: types.Message, state: FSMContext):
+    await state.set_state(BetForm.question)
+    await message.answer("❓ Введите вопрос:")
+
+
+@dp.message(BetForm.question)
+async def get_question(message: types.Message, state: FSMContext):
+    await state.update_data(question=message.text)
+    await state.set_state(BetForm.payment_link)
+
+    await message.answer("💰 Вставь ссылку на оплату:")
+
+
+@dp.message(BetForm.payment_link)
+async def send_poll(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    question = data["question"]
+    link = message.text
+
+    # проверяем комнату
+    room = await db.fetchrow(
+        "SELECT * FROM rooms WHERE creator_id=$1",
+        message.from_user.id
+    )
+
+    if not room:
+        await message.answer("❌ Ты не создатель комнаты")
         return
 
-    user_ids = [u["user_id"] for u in users]
-    pairs = draw_pairs(user_ids)
-
-    for giver, receiver in pairs:
-        receiver_name = next(u["name"] for u in users if u["user_id"] == receiver)
-
-        await bot.send_message(
-            giver,
-            f"🎁 Ты даришь подарок: {receiver_name}"
-        )
-
-        await db.execute(
-            "INSERT INTO assignments (giver_id, receiver_id, room_id) VALUES ($1, $2, $3)",
-            giver, receiver, room["id"]
-        )
-
-    await db.execute(
-        "UPDATE rooms SET is_drawn=TRUE WHERE id=$1",
+    users = await db.fetch(
+        "SELECT user_id FROM participants WHERE room_id=$1",
         room["id"]
     )
 
-    await message.answer("🎉 Жеребьёвка проведена!")
+    if not users:
+        await message.answer("❌ Нет участников")
+        return
+
+    sent = 0
+
+    for user in users:
+        try:
+            # сообщение
+            await bot.send_message(
+                chat_id=user["user_id"],
+                text=(
+                    f"❓ {question}\n\n"
+                    f"🗳 Проголосуй ниже\n"
+                    f"💰 Участвовать:\n{link}"
+                )
+            )
+
+            # poll
+            await bot.send_poll(
+                chat_id=user["user_id"],
+                question=question,
+                options=["Да", "Нет"],
+                is_anonymous=False
+            )
+
+            sent += 1
+
+        except:
+            pass  # пользователь не открыл чат
+
+    await message.answer(f"✅ Отправлено: {sent} участникам")
+    await state.clear()
 
 
 # ---------- MAIN ----------
 async def main():
     await create_pool()
     await dp.start_polling(bot)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
