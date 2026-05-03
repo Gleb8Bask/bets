@@ -78,7 +78,7 @@ cp .env.example .env
 
 Edit `.env`:
 ```env
-DATABASE_URL=postgresql://user:password@localhost:5432/polymarket
+DATABASE_URL=postgresql://user_bet:bets753@localhost:5432/bets_bot
 SECRET_KEY=<generate with: python -c "import secrets; print(secrets.token_hex(32))">
 ```
 
